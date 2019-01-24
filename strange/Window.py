@@ -26,6 +26,7 @@ class SlidingWindow:
     loaded in from the results of a Coalseq class object.   
     """
     def __init__(self, name, workdir, ipyclient=None):
+        
         # setup and check path to data files
         self.name = name
         self.workdir = os.path.realpath(os.path.expanduser(workdir))
@@ -45,6 +46,9 @@ class SlidingWindow:
             'raxml-ng_v0.7.0_{}_x86_64'.format(platform)
         ))
 
+        # mb binary should be in path since we can `conda install mb -c ipyrad'
+        self.mb_binary = "mb"
+
         # load Coalseq results from paths
         self.tree = toytree.tree(os.path.join(self.workdir, name + ".newick"))
         self.database = os.path.join(self.workdir, name + ".hdf5")
@@ -55,6 +59,8 @@ class SlidingWindow:
 
         # new attrs to fill
         self.raxml_table = pd.DataFrame({})
+        self.mb_database = None
+        self.mb_database_mstrees = None
         self.snames = None
         self.seqarr = None
         
@@ -138,9 +144,69 @@ class SlidingWindow:
         Run mrbayes on a sliding window and summarize the posterior 
         distribution of gene trees like in mbsum, save to file or table...
         """
-        pass
+        
+        # open h5 view to file
+        with h5py.File(self.database, 'r') as io5:
+            dims = io5["seqarr"].shape
+
+        # how many windows in chromosome
+        nwindows = int((dims[1]) / slide_interval)
+        assert nwindows, "No windows in data"
+
+        # get all intervals in a generator
+        starts = range(0, dims[1] - window_size, slide_interval)
+        stops = range(window_size, dims[1], slide_interval)
+        intervals = zip(starts, stops)
+
+        # start a hdf5 file for holding sliding window results
+        self.mb_database = os.path.join(self.workdir, self.name + "_mb.hdf5")
+
+        # parallelize mb tree inference
+        if self.ipyclient:
+            time0 = time.time()
+            lbview = self.ipyclient.load_balanced_view()
+
+            # infer trees by pulling in sequence from hdf5 on remote engines
+            rasyncs = {}
+            for idx, (start, stop) in enumerate(intervals):
+                args = (self.mb_binary, self.database, start, stop)
+                rasyncs[idx] = lbview.apply(run_mb, *args)
+
+            # track progress and collect results.
+            done = 0
+            while 1:
+                finished = [i for i in rasyncs if rasyncs[i].ready()]
+                for idx in finished:
+                    if rasyncs[idx].successful():
 
 
+                        nsnps, tree = rasyncs[idx].get()
+                        self.raxml_table.loc[idx, "nsnps"] = nsnps
+                        self.raxml_table.loc[idx, "tree"] = tree
+                        del rasyncs[idx]
+                        done += 1
+                    else:
+                        raise Exception(rasyncs[idx].get())
+                # progress
+                progressbar(done, nwindows, time0, "inferring raxml trees")
+                time.sleep(0.5)
+                if not rasyncs:
+                    break
+
+
+
+def run_mb(mb_binary, database, start, stop):
+    "Build a tmp nex file and run mb on it, write PP trees to a file."
+
+    # get sequence interval and count nsnps
+    with h5py.File(database, 'r') as io5:
+        names = io5.attrs["names"]
+        seqs = io5["seqarr"][:, start:stop]
+        nsnps = np.invert(np.all(seqs == seqs[0], axis=0)).sum().astype(int)
+
+    # build name string for nex
+    nexlist = 
+    
 
 def run_raxml(raxml_binary, database, start, stop):
     "Build a temp phylip file, run raxml and return ML toytree"
@@ -193,6 +259,7 @@ def progressbar(finished, total, start, message):
 
 
 
+# PAT CODE
 class Window:
     def __init__(self,
         full_seq_path):
